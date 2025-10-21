@@ -18,12 +18,15 @@ class MNISTDataset(Dataset):
     """
 
     def __init__(
-        self, dataset_split: str, data_root: str, image_extension: str = "png"
+        self, dataset_split: str, data_root: str, image_extension: str = "png", condition_config=None
     ):
 
         self.dataset_split = dataset_split
         self.image_extension = image_extension
         self.image_paths, self.labels = self._load_image_metadata(Path(data_root))
+        
+        # Conditioning for the dataset
+        self.condition_types = [] if condition_config is None else  condition_config['condition_types']
 
         print(f"Found {len(self.image_paths)} images for {self.dataset_split} split")
 
@@ -59,6 +62,14 @@ class MNISTDataset(Dataset):
         """Load image and convert to normalized tensor."""
         image = Image.open(self.image_paths[index])
         tensor = torchvision.transforms.ToTensor()(image)
+        
+        cond_inputs = {}
+        if 'class' in self.condition_types:
+            cond_inputs['class'] = self.labels[index]
 
-        # Normalize to [-1, 1] range
-        return 2 * tensor - 1
+        im = 2 * tensor - 1
+        if len(self.condition_types) == 0:
+            # Normalize to [-1, 1] range
+            return im
+        else:
+             return im, cond_inputs
