@@ -186,7 +186,7 @@ class DownSamplingBlock(nn.Module):
             out.ndim == 4
         ), "Donwsample output dont haher 4 dim [batch, channels, H, W]"
         return out
-    
+
 
 class BottleNeck(nn.Module):
     """
@@ -346,7 +346,8 @@ class BottleNeck(nn.Module):
             out = out + self.residual_input_conv[i + 1](resnet_in)  # Residual
 
         return out
-    
+
+
 class UpSamplingBlock(nn.Module):
     """
     UNet upsampling block that combines:
@@ -493,7 +494,9 @@ class UpSamplingBlock(nn.Module):
         out_down: torch.Tensor = None,
     ) -> torch.Tensor:
         # Upsample and combine with skip connection
-        x = self.up_sample_conv(x)  # Increase spatial resolution (channels = pre_channels)
+        x = self.up_sample_conv(
+            x
+        )  # Increase spatial resolution (channels = pre_channels)
         if out_down is not None:
             x = torch.cat([x, out_down], dim=1)  # Concatenate with skip features
 

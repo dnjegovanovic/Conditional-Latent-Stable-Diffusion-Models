@@ -3,6 +3,7 @@ from torch import Tensor
 
 from typing import Dict
 
+
 class LinearNoiseScheduler:
     """Implements the linear noise scheduling mechanism from the DDPM paper.
 
@@ -22,7 +23,7 @@ class LinearNoiseScheduler:
     """
 
     ALLOWED_PARAMS = {"num_timesteps", "beta_start", "beta_end", "device"}
-    
+
     # Built-in defaults if a key is not provided
     DEFAULTS: Dict[str, float] = {
         "num_timesteps": 1000,
@@ -39,7 +40,7 @@ class LinearNoiseScheduler:
             beta_end: Ending value for beta schedule.
         """
         self.device = device
-        
+
         # 1) Start from defaults
         cfg: Dict = dict(self.DEFAULTS)
 
@@ -70,7 +71,6 @@ class LinearNoiseScheduler:
             raise ValueError("num_timesteps must be > 0")
         if not (0.0 < self.beta_start < self.beta_end < 1.0):
             raise ValueError("Require 0 < beta_start < beta_end < 1")
-
 
         # Generate linearly spaced beta values (Eq. 2 in paper)
         self.betas = torch.linspace(
@@ -150,6 +150,7 @@ class LinearNoiseScheduler:
         # Add noise for stochastic sampling when t > 0
         z = torch.randn_like(x_t)
         return mean + sigma * z, x0
+
 
 def to(self, device):
     self.device = device
