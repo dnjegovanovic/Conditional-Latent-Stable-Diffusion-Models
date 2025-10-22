@@ -1,16 +1,12 @@
-import torch
-import torch.nn as nn
-from con_stable_diff_model.models.UNetBlocks import (
-    DownSamplingBlock,
-    BottleNeck,
-    UpSamplingBlock,
-)
-from con_stable_diff_model.models.TimeEmbedding import TimeEmbedding, time_embedding_fun
-
-from con_stable_diff_model.utils.config import *
+import torch  # Provides core tensor functionality for PyTorch models
+import torch.nn as nn  # Exposes neural network layers and modules from PyTorch
+from con_stable_diff_model.models.UNetBlocks import DownSamplingBlock, BottleNeck, UpSamplingBlock  # Imports UNet building blocks defined in this project
+from con_stable_diff_model.models.TimeEmbedding import TimeEmbedding, time_embedding_fun  # Brings in sinusoidal time embedding utilities for diffusion timesteps
+from con_stable_diff_model.utils.config import get_config_value, validate_class_config, validate_class_conditional_input, validate_text_config  # Loads helper functions for validation and configuration access
+from einops import einsum  # Allows concise tensor contractions used for class conditioning
 
 
-class UNet(nn.Module):
+class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusion model
     """
     UNet-like architecture with attention and time embedding for diffusion models.
 
@@ -23,148 +19,122 @@ class UNet(nn.Module):
         in_chanels: Number of input channels
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-        self.__dict__.update(kwargs)
+    def __init__(self, *args, **kwargs):  # Accepts flexible arguments so configs can be injected directly
+        super().__init__()  # Initializes parent nn.Module state
+        self.__dict__.update(kwargs)  # Copies keyword arguments (like UnetParams) into instance attributes
+        assert hasattr(self, "UnetParams"), "UNet expects an 'UnetParams' configuration dictionary."  # Ensures required configuration is present
 
-        # Channel configurations
-        self.down_channels = self.UnetParams["down_channels"]
-        self.time_emb_dim = self.UnetParams["time_emb_dim"]
-        self.down_sample = self.UnetParams["down_sample"]
-        self.in_channels = self.UnetParams["im_channels"]
-        self.mid_channels = self.UnetParams["mid_channels"]
-        self.num_down_layers = self.UnetParams["num_down_layers"]
-        self.num_mid_layers = self.UnetParams["num_mid_layers"]
-        self.num_up_layers = self.UnetParams["num_up_layers"]
-        self.attns = self.UnetParams["attn_down"]
+        # Channel configuration -------------------------------------------------------------
+        unet_config = self.UnetParams  # Caches the UNet hyperparameter dictionary for easier access
+        self.down_channels = unet_config["down_channels"]  # Channel widths for each encoder stage
+        self.mid_channels = unet_config["mid_channels"]  # Channel widths for bottleneck stages
+        self.down_sample = unet_config["down_sample"]  # Flags indicating whether to downsample in each encoder stage
+        self.attns = unet_config["attn_down"]  # Flags controlling attention usage in encoder stages
+        self.time_emb_dim = unet_config["time_emb_dim"]  # Dimensionality of the timestep embedding vector
+        self.in_channels = unet_config["im_channels"]  # Number of channels in the input image representation
+        self.num_down_layers = unet_config["num_down_layers"]  # Number of residual layers per encoder block
+        self.num_mid_layers = unet_config["num_mid_layers"]  # Number of residual layers in the bottleneck block
+        self.num_up_layers = unet_config["num_up_layers"]  # Number of residual layers per decoder block
 
-        assert self.mid_channels[0] == self.down_channels[-1]
-        assert self.mid_channels[-1] == self.down_channels[-2]
-        assert len(self.down_sample) == len(self.down_channels) - 1
-        assert len(self.attns) == len(self.down_channels) - 1
+        assert self.mid_channels[0] == self.down_channels[-1], "Bottleneck in_channels must match deepest encoder output."  # Verifies encoder-to-bottleneck interface
+        assert self.mid_channels[-1] == self.down_channels[-2], "Bottleneck out_channels must match penultimate encoder output."  # Verifies bottleneck-to-decoder interface
+        assert len(self.down_sample) == len(self.down_channels) - 1, "down_sample length must be one less than down_channels length."  # Ensures downsample flags align with transitions
+        assert len(self.attns) == len(self.down_channels) - 1, "attn_down length must be one less than down_channels length."  # Ensures attention flags align with transitions
 
-        ######## Class, Mask and Text Conditioning Config #####
-        self.class_cond = False
-        self.text_cond = False
-        self.image_cond = False
-        self.text_embed_dim = None
-        self.condition_config = get_config_value(
-            self.UnetParams("model_config"), "condition_config", None
-        )
-        if self.condition_config is not None:
-            assert (
-                "condition_types" in self.condition_config
-            ), "Condition Type not provided in model config"
-            condition_types = self.condition_config["condition_types"]
-            if "class" in condition_types:
-                validate_class_config(self.condition_config)
-                self.class_cond = True
-                self.num_classes = self.condition_config["class_condition_config"][
-                    "num_classes"
-                ]
-            if "text" in condition_types:
-                validate_text_config(self.condition_config)
-                self.text_cond = True
-                self.text_embed_dim = self.condition_config["text_condition_config"][
-                    "text_embed_dim"
-                ]
-            if "image" in condition_types:
-                self.image_cond = True
-                self.im_cond_input_ch = self.condition_config["image_condition_config"][
-                    "image_condition_input_channels"
-                ]
-                self.im_cond_output_ch = self.condition_config[
-                    "image_condition_config"
-                ]["image_condition_output_channels"]
-        if self.class_cond:
-            # Rather than using a special null class we dont add the
-            # class embedding information for unconditional generation
-            self.class_emb = nn.Embedding(self.num_classes, self.t_emb_dim)
+        # Conditioning configuration --------------------------------------------------------
+        self.class_cond = False  # Tracks whether class conditioning is enabled
+        self.text_cond = False  # Tracks whether text conditioning is enabled
+        self.image_cond = False  # Tracks whether image conditioning is enabled
+        self.text_embed_dim = None  # Placeholder for text embedding dimensionality when configured
 
-        if self.image_cond:
-            # Map the mask image to a N channel image and
-            # concat that with input across channel dimension
-            self.cond_conv_in = nn.Conv2d(
-                in_channels=self.im_cond_input_ch,
-                out_channels=self.im_cond_output_ch,
-                kernel_size=1,
-                bias=False,
-            )
-            self.conv_in_concat = nn.Conv2d(
-                self.in_channels + self.im_cond_output_ch,
-                self.down_channels[0],
-                kernel_size=3,
-                padding=1,
-            )
-        else:
-            self.conv_in = nn.Conv2d(
-                self.in_channels, self.down_channels[0], kernel_size=3, padding=1
-            )
-        self.cond = self.text_cond or self.image_cond or self.class_cond
-        ###################################
+        model_config = get_config_value(unet_config, "model_config", unet_config)  # Supports nested model_config wrappers while defaulting to the same dictionary
+        self.condition_config = get_config_value(model_config, "condition_config", None)  # Retrieves optional conditioning configuration section
 
-        # Time embedding projection
-        self.time_proj = TimeEmbedding(self.time_emb_dim, True)
+        if self.condition_config is not None:  # Only parse conditioning blocks if provided
+            assert "condition_types" in self.condition_config, "Condition configuration requires 'condition_types' field."  # Validates presence of condition types
+            condition_types = self.condition_config["condition_types"]  # Reads which conditioning modalities are requested
 
-        self.up_sample = list(reversed(self.down_sample))
+            if "class" in condition_types:  # Handles class conditioning setup
+                validate_class_config(self.condition_config)  # Validates class conditioning configuration
+                self.class_cond = True  # Marks that class conditioning is active
+                class_cfg = self.condition_config["class_condition_config"]  # Accesses class conditioning hyperparameters
+                self.num_classes = class_cfg["num_classes"]  # Stores number of classes for embedding construction
+                self.class_drop_prob = class_cfg.get("cond_drop_prob", 0.0)  # Optional classifier-free guidance drop probability
 
-        # Initial convolution
-        self.conv_in = nn.Conv2d(
-            self.in_channels, self.down_channels[0], kernel_size=3, padding=1
-        )
+            if "text" in condition_types:  # Handles text conditioning setup
+                validate_text_config(self.condition_config)  # Validates text conditioning configuration
+                self.text_cond = True  # Marks that text conditioning is active
+                self.text_embed_dim = self.condition_config["text_condition_config"]["text_embed_dim"]  # Stores expected text embedding dimensionality
 
-        # Downsampling blocks
-        self.down_sampling = nn.ModuleList([])
-        for i in range(len(self.down_channels) - 1):
-            self.down_sampling.append(
+            if "image" in condition_types:  # Handles image or mask conditioning setup
+                image_cfg = self.condition_config["image_condition_config"]  # Accesses image conditioning hyperparameters
+                self.image_cond = True  # Marks that image conditioning is active
+                self.im_cond_input_ch = image_cfg["image_condition_input_channels"]  # Reads conditioning image input channel count
+                self.im_cond_output_ch = image_cfg["image_condition_output_channels"]  # Reads number of channels produced after preprocessing
+
+        if self.class_cond:  # Builds class embedding table when class conditioning is enabled
+            self.class_emb = nn.Embedding(self.num_classes, self.time_emb_dim)  # Translates class ids into embeddings aligned with timestep dimension
+
+        if self.image_cond:  # Prepares image conditioning layers when requested
+            self.cond_conv_in = nn.Conv2d(self.im_cond_input_ch, self.im_cond_output_ch, kernel_size=1, bias=False)  # Projects conditioning image into desired channel dimension
+            self.conv_in = nn.Conv2d(self.in_channels + self.im_cond_output_ch, self.down_channels[0], kernel_size=3, padding=1)  # Combines original and conditioning images before encoding
+        else:  # Handles the standard non-image-conditioned case
+            self.conv_in = nn.Conv2d(self.in_channels, self.down_channels[0], kernel_size=3, padding=1)  # Converts raw input channels to first encoder channel count
+
+        # Time embedding projection ---------------------------------------------------------
+        self.time_proj = TimeEmbedding(self.time_emb_dim, True)  # Projects sinusoidal timestep encodings through an MLP
+
+        # Downsampling path ----------------------------------------------------------------
+        self.down_sampling = nn.ModuleList()  # Holds encoder blocks for each resolution stage
+        for idx in range(len(self.down_channels) - 1):  # Iterates over transitions between encoder stages
+            self.down_sampling.append(  # Appends a new DownSamplingBlock configured for this stage
                 DownSamplingBlock(
-                    in_channels=self.down_channels[i],
-                    out_channels=self.down_channels[i + 1],
-                    time_emb_dim=self.time_emb_dim,
-                    down_sample=self.down_sample[i],
-                    num_layers=self.num_down_layers,
-                    use_attn=self.attns[i],
+                    in_channels=self.down_channels[idx],  # Number of channels entering the block
+                    out_channels=self.down_channels[idx + 1],  # Number of channels after the block
+                    time_emb_dim=self.time_emb_dim,  # Dimension of timestep embedding injected into the block
+                    down_sample=self.down_sample[idx],  # Whether to reduce spatial resolution at the end of the block
+                    num_layers=self.num_down_layers,  # Number of residual layers to stack in the block
+                    use_attn=self.attns[idx],  # Whether to include attention in this block
                 )
             )
 
-        # Bottleneck blocks
-        self.bottleneck = nn.ModuleList([])
-        for i in range(len(self.mid_channels) - 1):
-            self.bottleneck.append(
+        # Bottleneck path ------------------------------------------------------------------
+        self.bottleneck = nn.ModuleList()  # Holds the series of bottleneck residual blocks
+        for idx in range(len(self.mid_channels) - 1):  # Iterates across bottleneck transitions
+            self.bottleneck.append(  # Appends a BottleNeck block responsible for deepest feature processing
                 BottleNeck(
-                    self.mid_channels[i],
-                    self.mid_channels[i + 1],
-                    self.time_emb_dim,
-                    num_layers=self.num_mid_layers,
+                    self.mid_channels[idx],  # Input channel count to the bottleneck block
+                    self.mid_channels[idx + 1],  # Output channel count from the bottleneck block
+                    self.time_emb_dim,  # Dimension of timestep embedding used in the block
+                    num_layers=self.num_mid_layers,  # Number of residual layers stacked inside the bottleneck
                 )
             )
 
-        # Upsampling blocks
-        # Build upsampling path with correct channel flow and skip concatenation
-        self.up_sampling = nn.ModuleList([])
-        current_in = self.mid_channels[-1]
-        for i in reversed(range(len(self.down_channels) - 1)):
-            skip_ch = self.down_channels[i]
-            pre_in = current_in  # channels before concatenation
-            out_ch = self.down_channels[i - 1] if i != 0 else 16
-            self.up_sampling.append(
+        # Upsampling path ------------------------------------------------------------------
+        self.up_sampling = nn.ModuleList()  # Holds decoder blocks that reconstruct high-resolution features
+        current_in_channels = self.mid_channels[-1]  # Tracks channel dimensionality entering the decoder
+        for idx in reversed(range(len(self.down_channels) - 1)):  # Walks encoder stages in reverse to mirror skip connections
+            skip_channels = self.down_channels[idx]  # Number of channels provided by the corresponding skip connection
+            out_channels = self.down_channels[idx - 1] if idx != 0 else 16  # Defines decoder output channels, capping the final stage at 16 channels
+            self.up_sampling.append(  # Appends a configured UpSamplingBlock to the decoder
                 UpSamplingBlock(
-                    in_channels=pre_in,
-                    out_channels=out_ch,
-                    skip_channels=skip_ch,
-                    time_emb_dim=self.time_emb_dim,
-                    up_sample=self.down_sample[i],
-                    num_layers=self.num_up_layers,
-                    use_attn=True,
+                    in_channels=current_in_channels,  # Channels entering from the previous decoder stage
+                    out_channels=out_channels,  # Channels produced by this decoder stage
+                    skip_channels=skip_channels,  # Channels from the skip connection to concatenate
+                    time_emb_dim=self.time_emb_dim,  # Timestep embedding dimensionality injected into the block
+                    up_sample=self.down_sample[idx],  # Mirrors encoder downsampling flag to decide on upsampling
+                    num_layers=self.num_up_layers,  # Number of residual layers in the decoder block
+                    use_attn=True,  # Enables attention in decoder blocks for richer feature fusion
                 )
             )
-            current_in = out_ch
+            current_in_channels = out_channels  # Updates the incoming channel count for the next decoder stage
 
-        # Output layers
-        self.norm_out = nn.GroupNorm(8, 16)
-        self.conv_out = nn.Conv2d(16, self.in_channels, kernel_size=3, padding=1)
+        # Output projection ----------------------------------------------------------------
+        self.norm_out = nn.GroupNorm(8, 16)  # Normalizes features before final projection using group normalization
+        self.activation = nn.SiLU()  # Stores the SiLU activation to avoid repeated instantiation
+        self.conv_out = nn.Conv2d(16, self.in_channels, kernel_size=3, padding=1)  # Maps processed features back to original channel count
 
-    def forward(self, x: torch.Tensor, t, cond_input=None):
+    def forward(self, x: torch.Tensor, t, cond_input=None):  # Performs a forward pass through the UNet
         """
         Forward pass of the UNet.
 
@@ -175,50 +145,49 @@ class UNet(nn.Module):
         Returns:
             Output tensor of same shape as input
         """
-        # Shapes assuming downblocks are [C1, C2, C3, C4]
-        # Shapes assuming midblocks are [C4, C4, C3]
-        # Shapes assuming downsamples are [True, True, False]
-        # B x C x H x W
-        out = self.conv_in(x)
-        # B x C1 x H x W
+        batch_size = x.shape[0]  # Captures the current batch size from the input tensor
 
-        # t_emb -> B x t_emb_dim
-        B = x.shape[0]
-        # Support scalar int, 0-dim tensor, or per-sample (B,) tensor for timesteps
-        if isinstance(t, torch.Tensor):
-            if t.dim() == 0:
-                t_vec = t.expand(B).to(device=x.device, dtype=torch.float32)
-            else:
-                assert t.shape[0] == B, "t must be scalar or have shape (B,)"
-                t_vec = t.to(device=x.device, dtype=torch.float32)
-        else:
-            t_vec = torch.full((B,), float(t), device=x.device, dtype=torch.float32)
-        t_emb = time_embedding_fun(t_vec, self.time_emb_dim)
-        t_emb = self.time_proj(t_emb)
+        if self.image_cond:  # Handles optional image conditioning during the forward pass
+            assert (
+                cond_input is not None and "image" in cond_input
+            ), "Image conditioning requested but 'image' tensor missing from cond_input."  # Ensures conditioning information is supplied when needed
+            cond_image = self.cond_conv_in(cond_input["image"])  # Projects conditioning image to the configured channel count
+            out = self.conv_in(torch.cat([x, cond_image], dim=1))  # Concatenates conditioning features with the input and applies initial convolution
+        else:  # Handles standard case without image conditioning
+            out = self.conv_in(x)  # Applies the initial convolution to obtain first-stage features
 
-        down_outs = []
+        if isinstance(t, torch.Tensor):  # Supports both tensor and scalar timestep inputs
+            if t.dim() == 0:  # Broadcasts scalar tensors to match batch size
+                t_vec = t.expand(batch_size).to(device=x.device, dtype=torch.float32)  # Broadcasts single timestep across the batch
+            else:  # Handles per-sample timestep tensors
+                assert t.shape[0] == batch_size, "Per-sample timestep tensor must align with batch size."  # Validates that timestep tensor matches batch dimension
+                t_vec = t.to(device=x.device, dtype=torch.float32)  # Moves timesteps to the correct device and dtype
+        else:  # Handles integer or float timesteps supplied as standard Python values
+            t_vec = torch.full((batch_size,), float(t), device=x.device, dtype=torch.float32)  # Creates a tensor filled with the scalar timestep
 
-        # Downsampling path
-        for idx, down in enumerate(self.down_sampling):
-            down_outs.append(out)
-            out = down(out, t_emb)
-        # down_outs  [B x C1 x H x W, B x C2 x H/2 x W/2, B x C3 x H/4 x W/4]
-        # out B x C4 x H/4 x W/4
+        time_embedding = time_embedding_fun(t_vec, self.time_emb_dim)  # Computes sinusoidal timestep embeddings
+        time_embedding = self.time_proj(time_embedding)  # Projects timestep embeddings through the learned projection
 
-        # Bottleneck
-        for mid in self.bottleneck:
-            out = mid(out, t_emb)
-        # out B x C3 x H/4 x W/4
+        if self.class_cond:  # Applies class conditioning when configured
+            validate_class_conditional_input(cond_input, x, self.num_classes)  # Ensures provided class conditioning tensor is valid
+            class_probs = cond_input["class"].float()  # Retrieves class probabilities (or one-hot vectors) as float values
+            class_embed = einsum(class_probs, self.class_emb.weight, "b n, n d -> b d")  # Pools class embeddings weighted by the provided probabilities
+            time_embedding = time_embedding + class_embed  # Adds class-conditioning signal to the timestep embedding
 
-        # Upsampling path
-        for up in self.up_sampling:
-            down_out = down_outs.pop()
-            out = up(out, t_emb, down_out)
-            # out [B x C2 x H/4 x W/4, B x C1 x H/2 x W/2, B x 16 x H x W]
+        down_outs = []  # Stores activations for skip connections during decoding
 
-        # Final output
-        out = self.norm_out(out)
-        out = nn.SiLU()(out)
-        out = self.conv_out(out)
-        # out B x C x H x W
-        return out
+        for down_block in self.down_sampling:  # Iterates through encoder blocks to progressively downsample features
+            down_outs.append(out)  # Saves current features for later skip connection
+            out = down_block(out, time_embedding)  # Processes features through the encoder block with timestep conditioning
+
+        for mid_block in self.bottleneck:  # Applies bottleneck processing at the lowest resolution
+            out = mid_block(out, time_embedding)  # Refines features with additional residual layers and attention
+
+        for up_block in self.up_sampling:  # Iterates through decoder blocks to reconstruct spatial resolution
+            skip = down_outs.pop()  # Retrieves the corresponding skip connection features
+            out = up_block(out, time_embedding, skip)  # Merges current features with skip connection and applies decoder processing
+
+        out = self.norm_out(out)  # Normalizes decoder output before activation
+        out = self.activation(out)  # Applies non-linearity prior to final projection
+        out = self.conv_out(out)  # Projects features back to the original number of channels
+        return out  # Returns the denoised prediction matching the input tensor shape
