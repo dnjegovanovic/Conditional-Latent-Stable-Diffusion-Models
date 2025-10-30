@@ -1,5 +1,11 @@
 from __future__ import annotations  # Enable postponed evaluation of annotations for forward references
-
+import os
+import sys
+# Ensure repo root is on sys.path so `ulsd_model` can be imported without installation
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+    
 import argparse  # Provide parsing utilities for command line arguments
 import random  # Offer Python-level random number generation for reproducibility
 from pathlib import Path  # Supply filesystem path manipulations with object-oriented interface
@@ -132,7 +138,7 @@ def build_dataset(  # Instantiate dataset based on configuration settings
 
 def train(config: Dict[str, Any]) -> None:  # Execute the DDPM training loop using supplied configuration
     """Train a conditional DDPM on VQ-VAE latents."""  # Provide overview of training routine
-    diffusion_cfg = config["dcond_modeliffusion_params"]  # Extract diffusion hyperparameters controlling noise schedule
+    diffusion_cfg = config["diffusion_params"]  # Extract diffusion hyperparameters controlling noise schedule
     dataset_cfg = config["dataset_params"]  # Retrieve dataset configuration for data loading
     unet_cfg = config["UnetParams"]  # Obtain UNet architectural parameters
     vqvae_cfg = config["VQVAE"]  # Load VQ-VAE architectural settings
@@ -155,7 +161,7 @@ def train(config: Dict[str, Any]) -> None:  # Execute the DDPM training loop usi
         pin_memory=DEVICE.type == "cuda",  # Pin host memory to speed up GPU transfers
     )
 
-    output_dir = Path(train_cfg.get("task_name_ddpm_vqvae", train_cfg["task_name"]))  # Directory to store checkpoints and samples
+    output_dir = Path(train_cfg.get("task_name_ddpm_cond", train_cfg["task_name"]))  # Directory to store checkpoints and samples
     vqvae_dir = Path(train_cfg["task_name"])  # Directory holding VQ-VAE checkpoints and latents
     ensure_dir(output_dir)  # Create output directory if it does not exist
 
@@ -286,7 +292,7 @@ def parse_args() -> argparse.Namespace:  # Parse command-line options for this s
     parser.add_argument(  # Register --config CLI flag
         "--config",
         dest="config_path",
-        default="./ulsd_model/config.yml",
+        default="./con_stable_diff_model/config.yml",
         type=str,
     )
     return parser.parse_args()  # Execute parsing and return populated namespace

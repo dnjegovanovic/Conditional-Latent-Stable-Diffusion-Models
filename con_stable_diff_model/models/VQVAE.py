@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.UNetBlocks import DownSamplingBlock, BottleNeck, UpSamplingBlock
+from .UNetBlocks import DownSamplingBlock, BottleNeck, UpSamplingBlock
 
 
 class VectorQuantizedVAE(nn.Module):

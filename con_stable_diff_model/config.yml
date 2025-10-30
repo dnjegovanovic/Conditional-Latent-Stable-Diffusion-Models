@@ -32,7 +32,7 @@ cond_model:
       cond_drop_prob: 0.1
 
 dataset_params:
-  im_path: 'data/MNIST/mnist_images'
+  im_path: '/home/dusan/Desktop/ML_PROJECTS/git/StableDiffusion-ULDM/data/MNIST/mnist_images'
   im_channels : 1
   im_size : 28
   name: 'mnist'
@@ -74,6 +74,7 @@ train_params:
   seed : 1111
   task_name: 'mnist'
   task_name_ddpm_vqvae: 'mnist_ddpm_vqvae'
+  task_name_ddpm_cond: 'mnist_ddpm_vqvae_cond'
   ldm_batch_size: 16
   ldm_img_save_steps: 3000
   autoencoder_batch_size: 16

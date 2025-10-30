@@ -12,6 +12,15 @@ build/
 develop-eggs/
 dist/
 downloads/
+/data/
+./data/
+data/*
+/mnist_ddpm_vqvae/
+./mnist_ddpm_vqvae/
+mnist_ddpm_vqvae/*
+/mnist/
+./mnist/
+mnist/*
 eggs/
 .eggs/
 lib/
