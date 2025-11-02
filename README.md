@@ -24,6 +24,16 @@ condition_config:
 - **Image conditioning** – If configured, supply `cond_input["image"]` with the same spatial resolution as the latent being denoised; it will be projected and concatenated channel-wise.
 - **Text conditioning** – Reserved for future text encoders; set `text_condition_config` to describe the embedding dimensionality.
 
+## Class Conditioning Details
+- Enable label guidance by setting `condition_types: ['class']` in `config.yml` and making sure the dataset emits class indices (see `MNISTDataset` for an example).
+- During training the helper `prepare_class_condition` converts integer labels to one-hot encodings and applies optional classifier-free guidance dropout controlled by `cond_drop_prob`.
+- The UNet validates that a class tensor is always present when class conditioning is active; this prevents mismatches between configuration and runtime inputs.
+- Sampling can be steered toward specific digits by creating a one-hot tensor of the desired classes and passing it as `cond_input` when calling `sample_diffusion_latents`.
+- Adjust `num_classes` to match your dataset and consider increasing `cond_drop_prob` if you want stronger classifier-free guidance during inference.
+
 ## Development Tips
 - Keep configuration dictionaries in sync with the validation helpers to avoid runtime assertions.
 - When introducing new conditioning modalities, extend the helper functions in `utils/config.py` and follow the commenting pattern used in `modules/UNet.py`.
+
+## Related Resources
+- To train the companion `ddpm_vqvae` pipeline, refer to the upstream project at [`StableDiffusion-ULDM`](https://github.com/dnjegovanovic/StableDiffusion-ULDM) for setup instructions and pretrained assets.

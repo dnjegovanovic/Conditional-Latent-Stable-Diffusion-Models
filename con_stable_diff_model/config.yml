@@ -76,7 +76,7 @@ train_params:
   task_name_ddpm_vqvae: 'mnist_ddpm_vqvae'
   task_name_ddpm_cond: 'mnist_ddpm_vqvae_cond'
   ldm_batch_size: 16
-  ldm_img_save_steps: 3000
+  ldm_img_save_steps: 2000
   autoencoder_batch_size: 16
   disc_start: 1000
   disc_weight: 0.5

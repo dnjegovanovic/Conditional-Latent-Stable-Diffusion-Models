@@ -262,12 +262,25 @@ def train(config: Dict[str, Any]) -> None:  # Execute the DDPM training loop usi
                 real_latents = latents[:real_count].detach()  # Slice latent batch for visualization
                 real_images = decode_latents_to_images(real_latents, vqvae)  # Decode latents to image space for reconstructions
 
+                sample_cond_input: Optional[Dict[str, Tensor]] = None  # Prepare conditioning used during sampling
+                if condition_config and "class" in condition_types and latent_shape is not None:
+                    num_classes = int(condition_config["class_condition_config"]["num_classes"])
+                    sample_classes = torch.randint(  # Draw random class labels for conditional sampling
+                        low=0,
+                        high=num_classes,
+                        size=(viz_samples,),
+                        device=DEVICE,
+                        dtype=torch.long,
+                    )
+                    class_one_hot = F.one_hot(sample_classes, num_classes=num_classes).float()
+                    sample_cond_input = {"class": class_one_hot}  # Supply conditioning dictionary expected by the UNet
+
                 sampled_latents = sample_diffusion_latents(  # Generate samples via reverse diffusion
                     model=model,
                     scheduler=scheduler,
                     num_samples=viz_samples,
                     latent_shape=latent_shape,
-                    cond_input=None,
+                    cond_input=sample_cond_input,
                 )
                 sampled_images = decode_latents_to_images(sampled_latents, vqvae)  # Decode generated latents to image space
 

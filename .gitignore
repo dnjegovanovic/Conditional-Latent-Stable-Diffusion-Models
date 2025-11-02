@@ -18,6 +18,10 @@ data/*
 /mnist_ddpm_vqvae/
 ./mnist_ddpm_vqvae/
 mnist_ddpm_vqvae/*
+
+/mnist_ddpm_vqvae_cond/
+./mnist_ddpm_vqvae_cond/
+mnist_ddpm_vqvae_cond/*
 /mnist/
 ./mnist/
 mnist/*
