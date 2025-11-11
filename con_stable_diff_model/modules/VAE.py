@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from UNetBlocks import DownSamplingBlock, BottleNeck, UpSamplingBlock
+from con_stable_diff_model.models.UNetBlocks import DownSamplingBlock, BottleNeck, UpSamplingBlock
 
 
 class VariationalAutoEncoder(nn.Module):
