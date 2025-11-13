@@ -72,7 +72,7 @@ class LPIPS(nn.Module):
         net="vgg",
         version="0.1",
         use_dropout=True,
-        auto_download: bool = False,
+        auto_download: bool = True,
         weights_url: str | None = None,
         backbone_pretrained: bool = True,
     ):

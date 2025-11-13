@@ -35,36 +35,72 @@ condition_config:
 - Keep configuration dictionaries in sync with the validation helpers to avoid runtime assertions.
 - When introducing new conditioning modalities, extend the helper functions in `utils/config.py` and follow the commenting pattern used in `modules/UNet.py`.
 
-## Training
-1. **Install dependencies**
-   ```bash
-   python -m venv .venv && source .venv/bin/activate
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # pick the wheel that matches your CUDA/CPU setup
-   pip install numpy pyyaml tqdm pillow
-   ```
-   The training script relies only on the libraries above plus the standard library.
+## Training Overview
+The repo exposes three training stages that build on each other:
 
-2. **Prepare data and the VQ-VAE checkpoint**
-   - `dataset_params.im_path` must point to a directory laid out as `{root}/{digit}/{image.png}`. The default configuration expects an extracted MNIST dataset; each digit folder (0–9) contains its samples.
-   - Train or download a VQ-VAE checkpoint first. The DDPM expects to find `train_params.vqvae_autoencoder_ckpt_name` (defaults to `vqvae_autoencoder_ckpt.pth`) inside the folder `train_params.task_name` (defaults to `mnist/`). If you use your own dataset, place the pretrained autoencoder weights in the analogous directory.
+| Stage | Script / `main.py --mode` | Config example | Purpose |
+|-------|---------------------------|----------------|---------|
+| VQ-VAE autoencoder | `scripts/train_vqvae.py` / `python main.py --mode vqvae --config con_stable_diff_model/config_vqvae_celeb.yml` | `config_vqvae_celeb.yml` | Learns an image-to-latent encoder/decoder for CelebA-HQ or MNIST. Produces `vqvae_autoencoder_ckpt.pth`. |
+| Latent DDPM (unconditional)| `scripts/train_ddpm_vqvae.py` / `python main.py --mode ddpm_vqvae --config ...` | `config_vqvae_celeb.yml` | Trains a DDPM directly on latents produced by the VQ-VAE. Saves `celeb_ddpm_vqvae/ddpm_ckpt.pth`. |
+| Conditional DDPM | `scripts/train_ddpm_cond.py` / `python main.py --mode ddpm_cond --config con_stable_diff_model/config_celeb.yml` | `config_celeb.yml` | Adds class/image/text conditioning on top of the latent DDPM for guided synthesis. |
 
-3. **Adjust `con_stable_diff_model/config.yml`**
-   - Update `dataset_params` (paths, number of channels, size).
-   - Set the conditioning you want under `cond_model.condition_config`.
-   - Modify `train_params` for batch size, epochs, learning rates, output folders, etc.
+Each config follows the same structure:
 
-4. **Launch DDPM training**
-   ```bash
-   python scripts/train_ddpm_cond.py --config con_stable_diff_model/config.yml
-   # or equivalently
-   python main.py --config con_stable_diff_model/config.yml
-   ```
-   The script will: load the frozen VQ-VAE, build the conditional UNet, train for `train_params.ldm_epochs`, and periodically write grids under `<task_name_ddpm_cond>/ddpm_samples/`.
+```yaml
+VQVAE:          # Autoencoder architecture (channels, attention, codebook)
+cond_model:     # Optional extra conditioning blocks specific to UNet
+dataset_params: # Dataset name (mnist, celeb), paths, image size/channels
+diffusion_params: # Beta schedule for DDPM
+UnetParams:     # Base UNet architecture; `im_channels` must match VQ-VAE z_channels
+train_params:   # Seeds, batch sizes, lr, checkpoint names, output folders
+```
 
-5. **Outputs and checkpoints**
-   - Checkpoints are saved each epoch to `<task_name_ddpm_cond>/<ldm_ckpt_name>` (default `mnist_ddpm_vqvae_cond/ddpm_ckpt.pth`).
-   - Reconstructions are logged under `ddpm_samples/recon/` and unconditional/conditional generations under `ddpm_samples/samples/`.
-   - To resume, keep the checkpoint in place and rerun the script with the same config; PyTorch will overwrite the file after the first subsequent epoch.
+Key `train_params` entries:
+- `task_name`: root folder containing autoencoder checkpoints and latents (e.g., `celeb/`).
+- `task_name_ddpm_vqvae` / `task_name_ddpm_cond`: output folders for the DDPM trainers.
+- `vqvae_autoencoder_ckpt_name`: file inside `task_name` holding the VQ-VAE weights.
+- `vqvae_latent_dir_name`: optional cache of encoded latents; if absent the DDPM trainer encodes on the fly.
+- `autoencoder_*` keys control VQ-VAE optimisation (batch size, lr, gradient accumulation, logging cadence).
+- `ldm_*` keys control the DDPM stages.
+
+### 1. Install dependencies
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install numpy pyyaml tqdm pillow
+```
+
+### 2. Prepare datasets
+- **MNIST**: directory structure `{root}/{digit}/{image.png}`. Set `dataset_params.name: mnist`, `im_channels: 1`, `im_size: 28`.
+- **CelebA-HQ**: set `dataset_params.name: celeb` (or `celebhq`), point `im_path` to the extracted CelebAMask-HQ root, and ensure masks exist if you use image conditioning. `dataset_factory` automatically selects `CelebDataset` for these names.
+
+### 3. Train the VQ-VAE
+```bash
+python main.py --mode vqvae --config con_stable_diff_model/config_vqvae_celeb.yml
+```
+This writes `celeb/vqvae_autoencoder_ckpt.pth`, discriminator checkpoints, and reconstruction grids under `celeb/vqvae_autoencoder_samples/`.
+
+### 4. Optional: cache latents
+After the VQ-VAE is trained you can precompute latents if desired (set `train_params.save_latents: True` in the VQ-VAE config or adapt your workflow). When absent, the DDPM trainer encodes inputs on the fly, which is slower but functional.
+
+### 5. Train the latent DDPM
+```bash
+python main.py --mode ddpm_vqvae --config con_stable_diff_model/config_vqvae_celeb.yml
+```
+This loads the VQ-VAE checkpoint, consumes `dataset_params`, and saves DDPM weights plus samples to `celeb_ddpm_vqvae/`.
+
+### 6. Train the conditional DDPM
+```bash
+python main.py --mode ddpm_cond --config con_stable_diff_model/config_celeb.yml
+```
+Make sure `train_params.task_name` in `config_celeb.yml` points to the folder containing the autoencoder checkpoint from step 3, and `cond_model.condition_config` matches your conditioning modality (e.g., image masks with 18 channels for CelebAMask-HQ). Outputs land in `celeb_ddpm_vqvae_cond/`.
+
+### 7. Outputs and checkpoints
+- VQ-VAE: `celeb/vqvae_autoencoder_ckpt.pth`, `celeb/vqvae_discriminator_ckpt.pth`, sample grids under `vqvae_autoencoder_samples/`.
+- Latent DDPM: `celeb_ddpm_vqvae/ddpm_ckpt.pth`, sample grids under `ddpm_samples/`.
+- Conditional DDPM: `celeb_ddpm_vqvae_cond/ddpm_ckpt.pth`, conditioned vs. reconstruction grids under `ddpm_samples/{recon,samples}/`.
+
+To resume training place the relevant checkpoint back in the expected folder and rerun the same command; the script overwrites the checkpoint after the next epoch.
 
 ## Related Resources
 - To train the companion `ddpm_vqvae` pipeline, refer to the upstream project at [`StableDiffusion-ULDM`](https://github.com/dnjegovanovic/StableDiffusion-ULDM) for setup instructions and pretrained assets.
