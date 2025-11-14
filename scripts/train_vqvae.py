@@ -140,6 +140,15 @@ def train(config: Dict[str, Any]) -> None:  # Main training routine
         output_dir / "vqvae_autoencoder_samples"
     )  # Subdirectory for reconstructions
 
+    auto_ckpt_path = output_dir / train_cfg["vqvae_autoencoder_ckpt_name"]
+    disc_ckpt_path = output_dir / train_cfg["vqvae_discriminator_ckpt_name"]
+    if auto_ckpt_path.exists():
+        model.load_state_dict(torch.load(auto_ckpt_path, map_location=DEVICE))
+        print(f"Resumed VQ-VAE weights from {auto_ckpt_path}")
+    if disc_ckpt_path.exists():
+        discriminator.load_state_dict(torch.load(disc_ckpt_path, map_location=DEVICE))
+        print(f"Resumed discriminator weights from {disc_ckpt_path}")
+
     recon_loss_fn = torch.nn.MSELoss()  # Reconstruction loss (L2)
     adv_loss_fn = torch.nn.MSELoss()  # Least-squares GAN loss
 

@@ -1,8 +1,14 @@
 import argparse
 from pathlib import Path
 
-from scripts.train_ddpm_cond import main as train_ddpm_conditional
-from scripts.train_ddpm_vqvae import train as train_ddpm_vqvae
+from scripts.train_ddpm_cond import (
+    train as train_ddpm_cond,
+    load_config as load_ddpm_cond_config,
+)
+from scripts.train_ddpm_vqvae import (
+    train as train_ddpm_vqvae,
+    load_config as load_ddpm_vqvae_config,
+)
 from scripts.train_vqvae import train as train_vqvae, load_config as load_vqvae_config
 
 
@@ -27,10 +33,8 @@ if __name__ == "__main__":
     config_path = Path(args.config)
 
     if args.mode == "ddpm_vqvae":
-        from scripts.train_ddpm_vqvae import load_config
-
-        train_ddpm_vqvae(load_config(config_path))
+        train_ddpm_vqvae(load_ddpm_vqvae_config(config_path))
     elif args.mode == "vqvae":
         train_vqvae(load_vqvae_config(config_path))
     else:
-        train_ddpm_conditional()
+        train_ddpm_cond(load_ddpm_cond_config(config_path))
