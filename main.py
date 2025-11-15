@@ -22,7 +22,7 @@ def parse_args():
     )
     parser.add_argument(
         "--config",
-        default="./con_stable_diff_model/config.yml",
+        default="./con_stable_diff_model/config_celeb.yml",
         help="Path to the configuration file.",
     )
     return parser.parse_args()

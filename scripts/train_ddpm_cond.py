@@ -528,7 +528,7 @@ def parse_args() -> argparse.Namespace:  # Parse command-line options for this s
     parser.add_argument(  # Register --config CLI flag
         "--config",
         dest="config_path",
-        default="./con_stable_diff_model/config.yml",
+        default="./con_stable_diff_model/config_celeb.yml",
         type=str,
     )
     return parser.parse_args()  # Execute parsing and return populated namespace
