@@ -1,5 +1,6 @@
 import torch  # Provides core tensor functionality for PyTorch models
 import torch.nn as nn  # Exposes neural network layers and modules from PyTorch
+import torch.nn.functional as F  # Supplies interpolation utilities for resizing condition inputs
 from con_stable_diff_model.models.UNetBlocks import (
     DownSamplingBlock,
     BottleNeck,
@@ -286,8 +287,15 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
             assert (
                 cond_input is not None and "image" in cond_input
             ), "Image conditioning requested but 'image' tensor missing from cond_input."  # Ensures conditioning information is supplied when needed
+            cond_image = cond_input["image"]
+            if cond_image.shape[-2:] != x.shape[-2:]:
+                cond_image = F.interpolate(
+                    cond_image,
+                    size=x.shape[-2:],
+                    mode="nearest",
+                )  # Align conditioning resolution with latent size
             cond_image = self.cond_conv_in(
-                cond_input["image"]
+                cond_image
             )  # Projects conditioning image to the configured channel count
             out = self.conv_in(
                 torch.cat([x, cond_image], dim=1)

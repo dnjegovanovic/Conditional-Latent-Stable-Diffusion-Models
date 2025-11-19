@@ -18,10 +18,16 @@ data/*
 /mnist_ddpm_vqvae/
 ./mnist_ddpm_vqvae/
 mnist_ddpm_vqvae/*
-celebhq/*
+
 /mnist_ddpm_vqvae_cond/
 ./mnist_ddpm_vqvae_cond/
 mnist_ddpm_vqvae_cond/*
+/celeb_ddpm_vqvae_cond/
+./celeb_ddpm_vqvae_cond/
+celebceleb_ddpm_vqvae_condhq/*
+/celebhq/
+./celebhq/
+celebhq/*
 /mnist/
 ./mnist/
 mnist/*

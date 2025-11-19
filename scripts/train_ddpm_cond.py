@@ -56,6 +56,30 @@ DEVICE = torch.device(
 )  # Choose GPU when available, otherwise fall back to CPU
 
 
+def assert_module_on_device(
+    module: torch.nn.Module, target: torch.device, name: str
+) -> None:
+    """
+    Ensure that the primary parameters/buffers of a module reside on the target device.
+    Raises a RuntimeError if a mismatch is detected so training does not silently
+    proceed on CPU when GPU acceleration is expected.
+    """
+    sample_tensor: Optional[Tensor] = None
+    for tensor in list(module.parameters()) + list(module.buffers()):
+        if tensor is not None:
+            sample_tensor = tensor
+            break
+    if sample_tensor is None:
+        return  # Nothing to assert for parameter-free modules
+    expected_type = target.type
+    tensor_device = sample_tensor.device
+    if tensor_device.type != expected_type:
+        raise RuntimeError(
+            f"{name} is on {tensor_device} but expected {target}. "
+            "Ensure .to(DEVICE) is called before training."
+        )
+
+
 def load_config(
     path: Path,
 ) -> Dict[str, Any]:  # Load YAML configuration from disk into a dictionary
@@ -287,6 +311,7 @@ def train(
     model = UNet(UnetParams=unet_params).to(
         DEVICE
     )  # Build UNet with provided parameters and move to training device
+    assert_module_on_device(model, DEVICE, "Conditional UNet")
     model.train()  # Set UNet to training mode so layers like dropout operate correctly
 
     vqvae = VQVAE(  # Instantiate VQ-VAE used to convert images to latent space
@@ -297,6 +322,7 @@ def train(
     ).to(
         DEVICE
     )  # Move VQ-VAE to device for encoding operations
+    assert_module_on_device(vqvae, DEVICE, "VQ-VAE autoencoder")
     vqvae.eval()  # Switch VQ-VAE to evaluation mode to freeze statistics
     for param in vqvae.parameters():  # Iterate over VQ-VAE parameters
         param.requires_grad = (

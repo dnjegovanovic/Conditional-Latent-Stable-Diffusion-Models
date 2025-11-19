@@ -41,6 +41,9 @@ class CelebDataset(Dataset):
         self.use_latents = (
             False  # Flag to indicate whether to return latents instead of pixels
         )
+        self.mask_root = None  # Base directory containing per-class mask shards
+        self.mask_dir_cache = {}  # Cache resolved directories for each mask id
+        self.mask_shard_size = 2000  # CelebAMask-HQ stores 2k images per shard
 
         self.condition_types = (
             [] if condition_config is None else condition_config["condition_types"]
@@ -59,6 +62,15 @@ class CelebDataset(Dataset):
             self.mask_w = condition_config["image_condition_config"][
                 "image_condition_w"
             ]  # Target mask width
+            self.mask_root = os.path.join(
+                self.im_path, "CelebAMask-HQ-mask-anno"
+            )  # Folder housing the per-part masks
+            if not os.path.isdir(self.mask_root):
+                raise FileNotFoundError(
+                    "Could not locate CelebAMask-HQ-mask-anno in {}".format(
+                        self.im_path
+                    )
+                )
 
         self.images, self.texts, self.masks = self.load_images(
             im_path
@@ -153,10 +165,8 @@ class CelebDataset(Dataset):
                     os.path.split(fname)[1].split(".")[0]
                 )  # Mask files use numeric naming
                 masks.append(
-                    os.path.join(
-                        im_path, "CelebAMask-HQ-mask", "{}.png".format(im_name)
-                    )
-                )  # Derive mask path
+                    str(im_name).zfill(5)
+                )  # Keep zero padded id for per-part lookup
         if "text" in self.condition_types:
             assert len(texts) == len(
                 ims
@@ -180,17 +190,25 @@ class CelebDataset(Dataset):
         :param index:
         :return:
         """
-        mask_im = Image.open(self.masks[index])  # Load the mask image file
-        mask_im = np.array(
-            mask_im
-        )  # Convert mask to numpy array for pixel-wise operations
+        mask_id = self.masks[index]  # Zero padded filename stem
+        mask_dir = self._resolve_mask_dir(mask_id)  # Directory housing mask shards
         im_base = np.zeros(
-            (self.mask_h, self.mask_w, self.mask_channels)
+            (self.mask_h, self.mask_w, self.mask_channels), dtype=np.float32
         )  # Initialize empty one-hot mask volume
-        for orig_idx in range(len(self.idx_to_cls_map)):
-            im_base[mask_im == (orig_idx + 1), orig_idx] = (
-                1  # Turn on voxels where this class label appears
-            )
+        for orig_idx, cls_name in self.idx_to_cls_map.items():
+            mask_path = os.path.join(mask_dir, f"{mask_id}_{cls_name}.png")
+            if not os.path.exists(mask_path):
+                continue  # Some classes are absent for a given face
+            with Image.open(mask_path).convert("L") as mask_im:
+                if mask_im.size != (self.mask_w, self.mask_h):
+                    mask_im = mask_im.resize(
+                        (self.mask_w, self.mask_h), resample=Image.NEAREST
+                    )
+                mask_arr = np.array(mask_im, dtype=np.float32)
+            mask_binary = (mask_arr > 127).astype(np.float32)
+            im_base[:, :, orig_idx] = np.maximum(
+                im_base[:, :, orig_idx], mask_binary
+            )  # Handle potential overlaps conservatively
         mask = (
             torch.from_numpy(im_base).permute(2, 0, 1).float()
         )  # Convert to CHW tensor and cast to float
@@ -243,3 +261,30 @@ class CelebDataset(Dataset):
                     im_tensor,
                     cond_inputs,
                 )  # Return image plus conditioning dictionary
+
+    def _resolve_mask_dir(self, mask_id):
+        """
+        CelebAMask-HQ splits annotation files across 15 folders where each one
+        stores masks for 2000 consecutive identities. This helper resolves the
+        folder containing the masks for a given sample, caching the result to
+        avoid repeated os calls in __getitem__.
+        """
+        if mask_id in self.mask_dir_cache:
+            return self.mask_dir_cache[mask_id]
+        shard_idx = int(mask_id) // self.mask_shard_size
+        candidate_dir = os.path.join(self.mask_root, str(shard_idx))
+        if os.path.isdir(candidate_dir):
+            self.mask_dir_cache[mask_id] = candidate_dir
+            return candidate_dir
+        # Fallback search in case the dataset layout differs
+        fallback_pattern = os.path.join(
+            self.mask_root, "*", "{}_*.png".format(mask_id)
+        )
+        matches = glob.glob(fallback_pattern)
+        if matches:
+            resolved_dir = os.path.dirname(matches[0])
+            self.mask_dir_cache[mask_id] = resolved_dir
+            return resolved_dir
+        raise FileNotFoundError(
+            "Could not locate mask annotations for image id {}".format(mask_id)
+        )
