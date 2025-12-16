@@ -41,6 +41,9 @@ class CelebDataset(Dataset):
         self.use_latents = (
             False  # Flag to indicate whether to return latents instead of pixels
         )
+        self.attribute_prompts = (
+            {}
+        )  # Optional text prompts synthesized from CelebA attribute labels
         self.mask_root = None  # Base directory containing per-class mask shards
         self.mask_dir_cache = {}  # Cache resolved directories for each mask id
         self.mask_shard_size = 2000  # CelebAMask-HQ stores 2k images per shard
@@ -71,6 +74,11 @@ class CelebDataset(Dataset):
                         self.im_path
                     )
                 )
+
+        if "text" in self.condition_types:
+            self.attribute_prompts = self._load_attribute_prompts(
+                im_path
+            )  # Populate attribute-driven prompts once
 
         self.images, self.texts, self.masks = self.load_images(
             im_path
@@ -145,20 +153,37 @@ class CelebDataset(Dataset):
             ims.append(fname)  # Track every discovered image path
 
             if "text" in self.condition_types:
-                im_name = os.path.split(fname)[1].split(".")[
-                    0
-                ]  # Derive base filename to look up caption file
-                captions_im = []  # Collect captions for this image
-                with open(
-                    os.path.join(im_path, "celeba-caption/{}.txt".format(im_name))
-                ) as f:
-                    for line in f.readlines():
-                        captions_im.append(
-                            line.strip()
-                        )  # Strip newline characters from caption strings
-                texts.append(
-                    captions_im
-                )  # Append list of captions for the current image
+                fname_full = os.path.split(fname)[1]  # Keep extension to match anno
+                fname_stem = fname_full.split(".")[0]  # Stem used for caption files
+
+                if self.attribute_prompts:
+                    prompt = self._lookup_attribute_prompt(fname_full)
+                    if prompt is None:
+                        raise FileNotFoundError(
+                            "Attribute prompt not found for {}. Ensure CelebAMask-HQ-attribute-anno.txt covers this file.".format(
+                                fname_full
+                            )
+                        )
+                    texts.append([prompt])
+                else:
+                    captions_im = []  # Collect captions for this image
+                    caption_path = os.path.join(
+                        im_path, "celeba-caption/{}.txt".format(fname_stem)
+                    )
+                    if not os.path.isfile(caption_path):
+                        raise FileNotFoundError(
+                            "Text conditioning requested but no attribute prompts or caption file found for {}".format(
+                                fname_full
+                            )
+                        )
+                    with open(caption_path) as f:
+                        for line in f.readlines():
+                            captions_im.append(
+                                line.strip()
+                            )  # Strip newline characters from caption strings
+                    texts.append(
+                        captions_im
+                    )  # Append list of captions for the current image
 
             if "image" in self.condition_types:
                 im_name = int(
@@ -288,3 +313,54 @@ class CelebDataset(Dataset):
         raise FileNotFoundError(
             "Could not locate mask annotations for image id {}".format(mask_id)
         )
+
+    def _load_attribute_prompts(self, im_path):
+        """
+        Pre-compute simple text prompts from CelebA-HQ binary attributes.
+        Returns a mapping of filename (e.g., '0.jpg') -> prompt string.
+        """
+        attr_path = os.path.join(im_path, "CelebAMask-HQ-attribute-anno.txt")
+        if not os.path.isfile(attr_path):
+            return {}
+        with open(attr_path, "r") as f:
+            lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+        if len(lines) < 3:
+            return {}
+        try:
+            _ = int(lines[0].split()[0])  # image count, unused except for validation
+        except ValueError:
+            return {}
+        attribute_names = lines[1].split()
+        prompts = {}
+        for line in lines[2:]:
+            parts = line.split()
+            if len(parts) < len(attribute_names) + 1:
+                continue
+            fname = parts[0]
+            values = parts[1 : len(attribute_names) + 1]
+            present = [
+                name.replace("_", " ")
+                for name, val in zip(attribute_names, values)
+                if val == "1"
+            ]
+            prompt = "portrait" if len(present) == 0 else "portrait, " + ", ".join(present)
+            prompts[fname] = prompt
+        if len(prompts) > 0:
+            print("Loaded {} attribute prompts for CelebA-HQ".format(len(prompts)))
+        return prompts
+
+    def _lookup_attribute_prompt(self, fname_full):
+        """
+        Look up a synthesized attribute prompt for a given image filename.
+        Handles common extensions by normalizing to the attribute annotation format.
+        """
+        if not self.attribute_prompts:
+            return None
+        if fname_full in self.attribute_prompts:
+            return self.attribute_prompts[fname_full]
+        stem = os.path.splitext(fname_full)[0]
+        for ext in ["jpg", "png", "jpeg"]:
+            candidate = "{}.{}".format(stem, ext)
+            if candidate in self.attribute_prompts:
+                return self.attribute_prompts[candidate]
+        return None

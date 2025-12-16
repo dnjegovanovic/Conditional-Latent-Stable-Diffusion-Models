@@ -201,6 +201,9 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
                     use_attn=self.attns[
                         idx
                     ],  # Whether to include attention in this block
+                    cross_attn=self.text_cond,
+                    cross_cont_dim=self.text_embed_dim,
+                    custom_cross_attn=True
                 )
             )
 
@@ -221,6 +224,9 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
                     ],  # Output channel count from the bottleneck block
                     self.time_emb_dim,  # Dimension of timestep embedding used in the block
                     num_layers=self.num_mid_layers,  # Number of residual layers stacked inside the bottleneck
+                    cross_attn=self.text_cond,
+                    cross_cont_dim=self.text_embed_dim,
+                    custom_cross_attn=True
                 )
             )
 
@@ -251,6 +257,9 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
                     ],  # Mirrors encoder downsampling flag to decide on upsampling
                     num_layers=self.num_up_layers,  # Number of residual layers in the decoder block
                     use_attn=True,  # Enables attention in decoder blocks for richer feature fusion
+                    cross_attn=self.text_cond,
+                    cross_cont_dim=self.text_embed_dim,
+                    custom_cross_attn=True
                 )
             )
             current_in_channels = out_channels  # Updates the incoming channel count for the next decoder stage
@@ -344,6 +353,14 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
             time_embedding = (
                 time_embedding + class_embed
             )  # Adds class-conditioning signal to the timestep embedding
+        
+        ############# Text cond
+        context_hidden_states = None
+        if self.text_cond:
+            assert 'text' in cond_input, \
+                "Model initialized with text conditioning but cond_input has no text information"
+            context_hidden_states = cond_input['text']
+        ############################
 
         down_outs = []  # Stores activations for skip connections during decoding
 
@@ -354,14 +371,14 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
         ):  # Iterates through encoder blocks to progressively downsample features
             down_outs.append(out)  # Saves current features for later skip connection
             out = down_block(
-                out, time_embedding
+                out, time_embedding, context_hidden_states
             )  # Processes features through the encoder block with timestep conditioning
 
         for (
             mid_block
         ) in self.bottleneck:  # Applies bottleneck processing at the lowest resolution
             out = mid_block(
-                out, time_embedding
+                out, time_embedding, context_hidden_states
             )  # Refines features with additional residual layers and attention
 
         for (
@@ -373,7 +390,7 @@ class UNet(nn.Module):  # Defines the core UNet architecture used by the diffusi
                 down_outs.pop()
             )  # Retrieves the corresponding skip connection features
             out = up_block(
-                out, time_embedding, skip
+                out, time_embedding, skip, context_hidden_states
             )  # Merges current features with skip connection and applies decoder processing
 
         out = self.norm_out(out)  # Normalizes decoder output before activation

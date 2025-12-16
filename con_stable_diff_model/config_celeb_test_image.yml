@@ -25,7 +25,7 @@ cond_model:
   num_up_layers: 2
   im_channels : 3
   condition_config:
-    #condition_types: [ 'text', 'image' ]
+    condition_types: [ 'text', 'image' ]
     condition_types: ['image']
     text_condition_config:
       text_embed_model: 'clip'

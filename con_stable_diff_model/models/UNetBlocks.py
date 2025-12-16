@@ -32,6 +32,10 @@ class DownSamplingBlock(nn.Module):
         num_layers: int = 1,
         use_attn: bool = True,
         grp_norm_chanels: int = 8,
+        cross_attn = False,
+        cross_cont_dim = None,
+        custom_cross_attn = True
+        
     ):
         super().__init__()
 
@@ -41,6 +45,9 @@ class DownSamplingBlock(nn.Module):
         self.num_layers = num_layers  # Number of residual/attention layers in block
         self.time_emb_dim = time_emb_dim
         self.use_attn = use_attn
+        self.cross_attn = cross_attn
+        self.cross_cont_dim = cross_cont_dim
+        self.custom_cross_attn = custom_cross_attn
 
         # First part of residual block (per layer)
         self.resnet_conv_first = nn.ModuleList(
@@ -119,6 +126,40 @@ class DownSamplingBlock(nn.Module):
                     ]
                 )
 
+        #### Cross attention ###
+        if self.cross_attn:
+            assert self.cross_cont_dim is not None, "Context dim must be passed for cross attention."
+            self.cross_attention_norm = nn.ModuleList(
+                [
+                    nn.GroupNorm(
+                        grp_norm_chanels, out_channels
+                    )  # Normalization before attention
+                    for _ in range(num_layers)
+                ]
+            )
+
+            # Choose attention implementation
+            if custom_cross_attn:
+                self.cross_attention = nn.ModuleList(
+                    [
+                        MultiHeadCrossAttention(
+                            num_heads, out_channels, self.cross_cont_dim ,input_proj_bias=False
+                        )
+                        for _ in range(num_layers)
+                    ]
+                )
+            else:
+                self.context_proj = nn.ModuleList(
+                    [nn.Linear(self.cross_cont_dim, out_channels)
+                    for _ in range(num_layers)]
+                )
+                self.cross_attention = nn.ModuleList(
+                    [
+                        nn.MultiheadAttention(out_channels, num_heads, batch_first=True)
+                        for _ in range(num_layers)
+                    ]
+                )
+
         # Residual connection projection (per layer)
         self.residual_input_conv = nn.ModuleList(
             [
@@ -138,7 +179,7 @@ class DownSamplingBlock(nn.Module):
             else nn.Identity()  # Skip downsampling
         )
 
-    def forward(self, x: torch.Tensor, time_emb: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, time_emb: torch.Tensor = None, context=None) -> torch.Tensor:
         out = x  # Preserve original input for residual connection
 
         for i in range(self.num_layers):
@@ -179,6 +220,30 @@ class DownSamplingBlock(nn.Module):
                 # Reshape back to original dimensions
                 out_attn = out_attn.reshape(batch_size, chanels, h, w)
                 out = out + out_attn  # Add attention output
+            
+            # Cross Attention processing
+            if self.cross_attn:
+                assert context is not None, "Cross attention requires a context tensor."
+                batch_size, chanels, h, w = out.shape
+                in_attn = out.reshape(
+                    batch_size, chanels, h * w
+                )  # Flatten spatial dims
+                in_attn = self.cross_attention_norm[i](in_attn)
+                if self.custom_mha:
+                    # Custom attention expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(-1, -2)
+                    out_attn = self.cross_attention[i](in_attn, context)
+                    out_attn = out_attn.transpose(-1, -2)
+                else:
+                    # PyTorch MHA expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(1, 2)
+                    contex_proj = self.context_proj[i](context)
+                    out_attn, _ = self.cross_attention[i](in_attn, contex_proj, contex_proj)
+                    out_attn = out_attn.transpose(1, 2)
+
+                # Reshape back to original dimensions
+                out_attn = out_attn.reshape(batch_size, chanels, h, w)
+                out = out + out_attn  # Add attention output
 
         # Final downsampling
         out = self.down_sample_conv(out)
@@ -204,6 +269,9 @@ class BottleNeck(nn.Module):
         custom_mha: bool = True,
         num_layers: int = 1,
         grp_norm_chanels: int = 8,
+        cross_attn = False,
+        cross_cont_dim = None,
+        custom_cross_attn = True
     ):
         super().__init__()
 
@@ -212,6 +280,9 @@ class BottleNeck(nn.Module):
         self.num_heads = num_heads  # Number of attention heads
         self.num_layers = num_layers  # Number of residual-attention layers
         self.time_emb_dim = time_emb_dim
+        self.cross_attn = cross_attn
+        self.cross_cont_dim = cross_cont_dim
+        self.custom_cross_attn = custom_cross_attn
 
         # First residual block components (N+1 layers)
         self.resnet_conv_first = nn.ModuleList(
@@ -291,6 +362,41 @@ class BottleNeck(nn.Module):
                 ]
             )
 
+        
+        #### Cross attention ###
+        if self.cross_attn:
+            assert self.cross_cont_dim is not None, "Context dim must be passed for cross attention."
+            self.cross_attention_norm = nn.ModuleList(
+                [
+                    nn.GroupNorm(
+                        grp_norm_chanels, out_channels
+                    )  # Normalization before attention
+                    for _ in range(num_layers)
+                ]
+            )
+
+            # Choose attention implementation
+            if custom_cross_attn:
+                self.cross_attention = nn.ModuleList(
+                    [
+                        MultiHeadCrossAttention(
+                            num_heads, out_channels, self.cross_cont_dim ,input_proj_bias=False
+                        )
+                        for _ in range(num_layers)
+                    ]
+                )
+            else:
+                self.context_proj = nn.ModuleList(
+                    [nn.Linear(self.cross_cont_dim, out_channels)
+                    for _ in range(num_layers)]
+                )
+                self.cross_attention = nn.ModuleList(
+                    [
+                        nn.MultiheadAttention(out_channels, num_heads, batch_first=True)
+                        for _ in range(num_layers)
+                    ]
+                )
+        
         # Residual connection projections (N+1 layers)
         self.residual_input_conv = nn.ModuleList(
             [
@@ -301,7 +407,7 @@ class BottleNeck(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor, time_emb: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, time_emb: torch.Tensor = None, context=None) -> torch.Tensor:
         out = x  # Initial feature map
 
         # First residual block
@@ -334,6 +440,30 @@ class BottleNeck(nn.Module):
             # Reshape and add attention output
             out_attn = out_attn.reshape(batch_size, chanels, h, w)
             out = out + out_attn  # Residual attention
+
+            # Cross Attention processing
+            if self.cross_attn:
+                assert context is not None, "Cross attention requires a context tensor."
+                batch_size, chanels, h, w = out.shape
+                in_attn = out.reshape(
+                    batch_size, chanels, h * w
+                )  # Flatten spatial dims
+                in_attn = self.cross_attention_norm[i](in_attn)
+                if self.custom_mha:
+                    # Custom attention expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(-1, -2)
+                    out_attn = self.cross_attention[i](in_attn, context)
+                    out_attn = out_attn.transpose(-1, -2)
+                else:
+                    # PyTorch MHA expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(1, 2)
+                    contex_proj = self.context_proj[i](context)
+                    out_attn, _ = self.cross_attention[i](in_attn, contex_proj, contex_proj)
+                    out_attn = out_attn.transpose(1, 2)
+            
+            # Reshape back to original dimensions
+            out_attn = out_attn.reshape(batch_size, chanels, h, w)
+            out = out + out_attn  # Add attention output
 
             # Subsequent residual block
             resnet_in = out  # Save input
@@ -368,6 +498,9 @@ class UpSamplingBlock(nn.Module):
         num_layers: int = 1,
         use_attn: bool = True,
         grp_norm_chanels: int = 8,
+        cross_attn = False,
+        cross_cont_dim = None,
+        custom_cross_attn = True
     ):
         super().__init__()
 
@@ -381,6 +514,10 @@ class UpSamplingBlock(nn.Module):
         self.pre_channels = in_channels  # channels before concatenation
         self.skip_channels = skip_channels  # channels coming from skip connection
         self.first_in_channels = in_channels + skip_channels  # channels after concat
+        self.cross_attn = cross_attn
+        self.cross_cont_dim = cross_cont_dim
+        self.custom_cross_attn = custom_cross_attn
+
 
         # Residual block components (per layer)
         self.resnet_conv_first = nn.ModuleList(
@@ -462,6 +599,40 @@ class UpSamplingBlock(nn.Module):
                     ]
                 )
 
+        #### Cross attention ###
+        if self.cross_attn:
+            assert self.cross_cont_dim is not None, "Context dim must be passed for cross attention."
+            self.cross_attention_norm = nn.ModuleList(
+                [
+                    nn.GroupNorm(
+                        grp_norm_chanels, out_channels
+                    )  # Normalization before attention
+                    for _ in range(num_layers)
+                ]
+            )
+
+            # Choose attention implementation
+            if custom_cross_attn:
+                self.cross_attention = nn.ModuleList(
+                    [
+                        MultiHeadCrossAttention(
+                            num_heads, out_channels, self.cross_cont_dim ,input_proj_bias=False
+                        )
+                        for _ in range(num_layers)
+                    ]
+                )
+            else:
+                self.context_proj = nn.ModuleList(
+                    [nn.Linear(self.cross_cont_dim, out_channels)
+                    for _ in range(num_layers)]
+                )
+                self.cross_attention = nn.ModuleList(
+                    [
+                        nn.MultiheadAttention(out_channels, num_heads, batch_first=True)
+                        for _ in range(num_layers)
+                    ]
+                )
+
         # Residual projections (per layer)
         self.residual_input_conv = nn.ModuleList(
             [
@@ -492,6 +663,7 @@ class UpSamplingBlock(nn.Module):
         x: torch.Tensor,
         time_emb: torch.Tensor = None,
         out_down: torch.Tensor = None,
+        context=None
     ) -> torch.Tensor:
         # Upsample and combine with skip connection
         x = self.up_sample_conv(
@@ -532,5 +704,29 @@ class UpSamplingBlock(nn.Module):
                 # Reshape and add attention output
                 out_attn = out_attn.reshape(batch_size, chanels, h, w)
                 out = out + out_attn  # Residual attention
+            
+            # Cross Attention processing
+            if self.cross_attn:
+                assert context is not None, "Cross attention requires a context tensor."
+                batch_size, chanels, h, w = out.shape
+                in_attn = out.reshape(
+                    batch_size, chanels, h * w
+                )  # Flatten spatial dims
+                in_attn = self.cross_attention_norm[i](in_attn)
+                if self.custom_mha:
+                    # Custom attention expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(-1, -2)
+                    out_attn = self.cross_attention[i](in_attn, context)
+                    out_attn = out_attn.transpose(-1, -2)
+                else:
+                    # PyTorch MHA expects (batch, seq_len, channels)
+                    in_attn = in_attn.transpose(1, 2)
+                    contex_proj = self.context_proj[i](context)
+                    out_attn, _ = self.cross_attention[i](in_attn, contex_proj, contex_proj)
+                    out_attn = out_attn.transpose(1, 2)
+
+                # Reshape back to original dimensions
+                out_attn = out_attn.reshape(batch_size, chanels, h, w)
+                out = out + out_attn  # Add attention output
 
         return out
