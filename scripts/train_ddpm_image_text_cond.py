@@ -46,7 +46,10 @@ from con_stable_diff_model.utils.config import (  # Configuration helpers to rea
     get_config_value,  # Utility to fetch values with defaults from config dictionaries
     validate_class_config,  # Runtime validation ensuring class conditioning settings are complete
     validate_image_config,
+    validate_text_config
 )
+
+from con_stable_diff_model.utils.text_model_utils import get_text_representation, get_tokenizer_and_model
 from con_stable_diff_model.utils.dataset_factory import build_dataset  # Dataset factory shared across training scripts
 
 from con_stable_diff_model.utils.diff_utils import *
@@ -260,6 +263,17 @@ def train(
             condition_config
         )  # Ensure mask-related dims/channels are specified
 
+    text_tokenizer = None
+    text_model = None
+    empty_text_embed = None
+    if "text" in condition_types:
+        validate_text_config(condition_config)
+        with torch.no_grad():
+            # Load tokenizer and text model
+            # Ser empty text representaiton
+            text_tokenizer, text_model = get_tokenizer_and_model(condition_config['text_condition_config']['text_embed_model'], device=DEVICE)
+            empty_text_embed = get_text_representation([''], text_tokenizer, text_model, DEVICE)
+    
     set_seed(
         train_cfg.get("seed", 0)
     )  # Seed all RNGs for reproducibility using configured seed
@@ -435,7 +449,20 @@ def train(
                     cond_input["image"] = drop_image_condition(
                         image_condition, images, im_drop_prob
                     )  # Apply classifier-free dropout
-
+                    
+                if "text" in condition_types:
+                    assert 'text' in raw_cond, "Conditioning Type Text but dataset did not provide text conditioning input"
+                    with torch.no_grad():
+                        text_condition = get_text_representation(raw_cond['text'],
+                                                text_tokenizer,
+                                                text_model,
+                                                DEVICE)
+                        text_drop_prob = get_config_value(condition_config['text_condition_config'],
+                                                        'cond_drop_prob', 0.)
+                        text_condition = drop_text_condition(text_condition, latents, empty_text_embed, text_drop_prob)
+                        cond_input['text'] = text_condition
+                    
+                    
             noise = torch.randn_like(
                 latents
             )  # Sample Gaussian noise matching latent shape
@@ -503,6 +530,10 @@ def train(
                         sample_cond_input["image"] = (
                             raw_cond["image"][:viz_samples].to(DEVICE).float()
                         )  # Reuse recent masks for visualization
+                    if "text" in condition_types and cond_input and "text" in cond_input:
+                        sample_cond_input["text"] = cond_input["text"][
+                            :viz_samples
+                        ]  # Reuse recent text embeddings for visualization
                     if not sample_cond_input:
                         sample_cond_input = None
 
