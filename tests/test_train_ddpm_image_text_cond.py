@@ -38,6 +38,8 @@ class _DummyScheduler:
     def __init__(self, device, num_timesteps, beta_start, beta_end):
         self.device = device
         self.num_timesteps = num_timesteps
+        self.sqrt_alphas_cumprod = torch.ones(num_timesteps, device=device)
+        self.sqrt_one_minus_alphas_cumprod = torch.zeros(num_timesteps, device=device)
 
     def add_noise(self, latents, noise, timesteps):
         return latents
@@ -97,7 +99,25 @@ def test_train_adds_text_cond_to_unet(monkeypatch, tmp_path):
             len(text) if isinstance(text, (list, tuple)) else 1, 2, 8
         ),
     )
-    monkeypatch.setattr(trainer, "save_image_grid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        trainer,
+        "render_text_prompts",
+        lambda prompts, size: torch.zeros((len(prompts), 3, size[0], size[1])),
+    )
+    monkeypatch.setattr(
+        trainer,
+        "format_image_condition",
+        lambda _cond, batch, size: torch.zeros((batch, 3, size[0], size[1])),
+    )
+
+    saved = []
+
+    def _record_save(images, directory, step, nrow, prefix):
+        saved.append(
+            {"count": int(images.shape[0]), "nrow": nrow, "prefix": prefix}
+        )
+
+    monkeypatch.setattr(trainer, "save_image_grid", _record_save)
 
     ckpt_dir = tmp_path / "celebhq"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +165,7 @@ def test_train_adds_text_cond_to_unet(monkeypatch, tmp_path):
             "task_name_ddpm_cond": str(tmp_path / "out"),
             "vqvae_model": str(ckpt_dir),
             "ldm_batch_size": 1,
-            "ldm_img_save_steps": 50,
+            "ldm_img_save_steps": 1,
             "ldm_epochs": 1,
             "num_workers": 0,
             "num_samples": 1,
@@ -163,6 +183,7 @@ def test_train_adds_text_cond_to_unet(monkeypatch, tmp_path):
     assert cond_inputs, "UNet forward should receive conditioning input"
     assert "text" in cond_inputs[0], "Text conditioning must be passed to the model"
     assert cond_inputs[0]["text"].shape[0] == 1
+    assert any(call["prefix"] == "viz" and call["nrow"] == 5 for call in saved)
 
 
 def test_main_routes_image_text_mode(monkeypatch, tmp_path):

@@ -11,6 +11,7 @@ if REPO_ROOT not in sys.path:
 
 import argparse  # Provide parsing utilities for command line arguments
 import random  # Offer Python-level random number generation for reproducibility
+import textwrap  # Provide simple text wrapping for visualization overlays
 from pathlib import (
     Path,
 )  # Supply filesystem path manipulations with object-oriented interface
@@ -148,6 +149,68 @@ def decode_latents_to_images(
     return (
         ((decoded + 1.0) / 2.0).detach().cpu()
     )  # Rescale to [0, 1], detach from graph, and move to CPU
+
+
+def render_text_prompts(
+    prompts: list[str], size: Tuple[int, int]
+) -> Tensor:  # Render text prompts into image tensors
+    """Render text prompts into RGB image tensors for side-by-side visualization."""
+    height, width = size
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return torch.zeros((len(prompts), 3, height, width))
+
+    font = ImageFont.load_default()
+    images = []
+    max_chars = max(10, int(width / 8))
+    for prompt in prompts:
+        canvas = Image.new("RGB", (width, height), color="white")
+        draw = ImageDraw.Draw(canvas)
+        text = "" if prompt is None else str(prompt)
+        lines = textwrap.wrap(text, width=max_chars) or [""]
+        draw.multiline_text((8, 8), "\n".join(lines), fill="black", font=font)
+        image_tensor = torch.from_numpy(np.array(canvas)).permute(2, 0, 1).float()
+        images.append(image_tensor / 255.0)
+    return torch.stack(images, dim=0)
+
+
+def format_image_condition(
+    image_condition: Optional[Tensor],
+    batch_size: int,
+    target_size: Tuple[int, int],
+) -> Tensor:
+    """Normalize image conditioning into a 3-channel visualization tensor."""
+    if image_condition is None:
+        return torch.zeros((batch_size, 3, *target_size))
+
+    cond = image_condition.float().detach()
+    if cond.dim() == 3:
+        cond = cond.unsqueeze(1)
+    if cond.shape[-2:] != target_size:
+        cond = F.interpolate(cond, size=target_size, mode="nearest")
+    if cond.shape[1] == 1:
+        cond = cond.repeat(1, 3, 1, 1)
+    elif cond.shape[1] == 3:
+        cond = cond
+    else:
+        labels = cond.argmax(dim=1, keepdim=True).float()
+        denom = max(cond.shape[1] - 1, 1)
+        cond = (labels / denom).repeat(1, 3, 1, 1)
+    return cond.clamp(0.0, 1.0).cpu()
+
+
+def predict_x0_from_noise(
+    scheduler: LinearNoiseScheduler, x_t: Tensor, noise_pred: Tensor, t: Tensor
+) -> Tensor:
+    """Compute predicted x0 from noisy latents and noise prediction."""
+    batch_size = x_t.shape[0]
+    sqrt_alpha = scheduler.sqrt_alphas_cumprod[t].reshape(batch_size, 1, 1, 1)
+    sqrt_one_minus = scheduler.sqrt_one_minus_alphas_cumprod[t].reshape(
+        batch_size, 1, 1, 1
+    )
+    x0 = (x_t - sqrt_one_minus * noise_pred) / sqrt_alpha
+    return x0.clamp(-1.0, 1.0)
 
 
 def sample_diffusion_latents(  # Perform reverse diffusion sampling to generate latents
@@ -365,8 +428,10 @@ def train(
     samples_root = output_dir / f"{train_cfg['task_name']}_samples"  # Base directory for storing generated sample grids
     recon_dir = samples_root / "recon"  # Directory for reconstruction visualizations
     sample_dir = samples_root / "samples"  # Directory for pure diffusion samples
+    viz_dir = samples_root / "viz"  # Directory for side-by-side conditioning visualizations
     ensure_dir(recon_dir)  # Create reconstruction directory if missing
     ensure_dir(sample_dir)  # Create sampling directory if missing
+    ensure_dir(viz_dir)  # Create visualization directory if missing
 
     save_every = max(
         1, int(train_cfg.get("ldm_img_save_steps", 1000))
@@ -502,6 +567,47 @@ def train(
                     real_latents, vqvae
                 )  # Decode latents to image space for reconstructions
 
+                with torch.no_grad():
+                    noisy_latents = noisy_latents[:real_count].detach()
+                    noise_pred_viz = noise_pred[:real_count].detach()
+                    timesteps_viz = timesteps[:real_count].detach()
+                    pred_x0 = predict_x0_from_noise(
+                        scheduler, noisy_latents, noise_pred_viz, timesteps_viz
+                    )
+                noisy_images = decode_latents_to_images(noisy_latents, vqvae)
+                denoised_images = decode_latents_to_images(pred_x0, vqvae)
+                if "text" in condition_types:
+                    raw_text = raw_cond.get("text", [""] * real_count)
+                    prompts = (
+                        raw_text
+                        if isinstance(raw_text, (list, tuple))
+                        else [raw_text]
+                    )
+                    prompts = list(prompts)[:real_count]
+                else:
+                    prompts = [""] * real_count
+                text_images = render_text_prompts(
+                    prompts, size=real_images.shape[-2:]
+                )
+                image_cond_vis = format_image_condition(
+                    raw_cond.get("image") if raw_cond else None,
+                    real_count,
+                    real_images.shape[-2:],
+                )
+
+                viz_columns = [
+                    image_cond_vis,
+                    text_images,
+                    real_images,
+                    noisy_images,
+                    denoised_images,
+                ]
+                viz_tiles = []
+                for idx in range(real_count):
+                    for col in viz_columns:
+                        viz_tiles.append(col[idx])
+                viz_grid = torch.stack(viz_tiles, dim=0)
+
                 sample_cond_input: Optional[Dict[str, Tensor]] = (
                     None  # Prepare conditioning used during sampling
                 )
@@ -556,6 +662,9 @@ def train(
                 save_image_grid(
                     sampled_images, sample_dir, sample_index, viz_rows, "sample"
                 )  # Save generated sample grid to disk
+                save_image_grid(
+                    viz_grid, viz_dir, sample_index, len(viz_columns), "viz"
+                )  # Save side-by-side conditioning visualization
                 tqdm.write(
                     f"Saved diffusion samples at step {global_step} (index {sample_index})."
                 )  # Log sampling event to console

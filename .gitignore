@@ -22,6 +22,7 @@ mnist_ddpm_vqvae/*
 /mnist_ddpm_vqvae_cond/
 ./mnist_ddpm_vqvae_cond/
 mnist_ddpm_vqvae_cond/*
+celeb_ddpm_text_image_cond/*
 /celeb_ddpm_vqvae_cond/
 ./celeb_ddpm_vqvae_cond/
 celebceleb_ddpm_vqvae_condhq/*
