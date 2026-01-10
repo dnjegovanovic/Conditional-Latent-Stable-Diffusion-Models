@@ -9,7 +9,7 @@ This repository explores conditional latent diffusion pipelines that pair a vari
 - **Modular UNet blocks** – Encoder, bottleneck, and decoder stages are composed from reusable residual/attention blocks defined in `con_stable_diff_model/models/UNetBlocks.py`.
 
 ## Configuration
-Edit `con_stable_diff_model/config.yml` to adjust architecture or conditioning settings. Within the `cond_model` or `UnetParams` sections you can enable conditioning by adding a `condition_config` block, for example:
+Edit the config file you plan to train with (for example `con_stable_diff_model/config_celeb.yml` or `con_stable_diff_model/config_celeb_text_image.yml`). Within the `cond_model` or `UnetParams` sections you can enable conditioning by adding a `condition_config` block, for example:
 
 ```yaml
 condition_config:
@@ -22,7 +22,65 @@ condition_config:
 ## Conditioning Inputs
 - **Class conditioning** – Pass `cond_input={"class": class_tensor}` where `class_tensor` has shape `(batch_size, num_classes)` and holds probabilities or one-hot encodings.
 - **Image conditioning** – If configured, supply `cond_input["image"]` with the same spatial resolution as the latent being denoised; it will be projected and concatenated channel-wise.
-- **Text conditioning** – Reserved for future text encoders; set `text_condition_config` to describe the embedding dimensionality.
+- **Text conditioning** – Use `text_condition_config` to pick the encoder (`clip` or `bert`) and match `text_embed_dim` to the model output (CLIP ViT-B/16 -> 512, DistilBERT -> 768).
+
+### Conditioning Implementation Details
+Below is how each conditioning signal is injected into the UNet. Shapes are shown for a batch size `B`.
+
+```
+Inputs
+  image x0 (B, 3, H, W) --VQ-VAE--> latents z (B, C, h, w)
+  timestep t ---------------------> time_emb (B, T)
+  class idx ----------------------> one_hot (B, num_classes)
+  text prompt --------------------> text_embed (B, L, D)
+  image mask ---------------------> mask (B, Cmask, Hm, Wm)
+
+UNet Conditioning Flow
+  time_emb --MLP--> t_proj (B, T)
+  class one_hot --Embedding--> class_emb (B, T)
+  t_proj + class_emb -------------------------> used in all ResNet blocks
+
+  mask --1x1 conv--> mask_proj (B, Cimg, h, w)
+  concat([z, mask_proj], dim=1) -> (B, C + Cimg, h, w) -> conv_in
+
+  text_embed (B, L, D) --> cross-attn context in Down/Mid/Up blocks
+```
+
+**Tensor stacking rules**
+- **Image conditioning**: stack by concatenating along channels:  
+  `z: (B, C, h, w)` + `mask_proj: (B, Cimg, h, w)` → `(B, C + Cimg, h, w)`.
+- **Class conditioning**: no stacking; class embedding is **added** to the timestep embedding (`t_proj + class_emb`).
+- **Text conditioning**: no stacking; text embedding is passed as **context** to cross-attention layers.
+
+**Classifier-free guidance (dropout)**
+- `cond_drop_prob` can drop class, image, or text conditions during training.
+- Dropped class embeddings become zeros, dropped image conditioning becomes zeros, and dropped text embeddings use an empty prompt embedding.
+
+### Conditional Options (config)
+You can enable one or more modalities with `condition_types`. Common combinations:
+- `['class']` for label guidance.
+- `['image']` for mask/segmentation guidance.
+- `['text']` for prompt guidance.
+- `['text', 'image']` for hybrid prompt + mask guidance.
+
+Minimal text+image configuration example:
+```yaml
+cond_model:
+  condition_config:
+    condition_types: ['text', 'image']
+    text_condition_config:
+      text_embed_model: 'clip'
+      text_embed_dim: 512
+      cond_drop_prob: 0.1
+    image_condition_config:
+      image_condition_input_channels: 18
+      image_condition_output_channels: 3
+      image_condition_h: 256
+      image_condition_w: 256
+      cond_drop_prob: 0.1
+```
+
+If you use text conditioning, make sure the dataset supplies a `text` field (CelebA-HQ prompts or captions are handled in `con_stable_diff_model/datasets/CelebDataset.py`).
 
 ## Class Conditioning Details
 - Enable label guidance by setting `condition_types: ['class']` in `config.yml` and making sure the dataset emits class indices (see `MNISTDataset` for an example).
@@ -43,6 +101,7 @@ The repo exposes three training stages that build on each other:
 | VQ-VAE autoencoder | `scripts/train_vqvae.py` / `python main.py --mode vqvae --config con_stable_diff_model/config_vqvae_celeb.yml` | `config_vqvae_celeb.yml` | Learns an image-to-latent encoder/decoder for CelebA-HQ or MNIST. Produces `vqvae_autoencoder_ckpt.pth`. |
 | Latent DDPM (unconditional)| `scripts/train_ddpm_vqvae.py` / `python main.py --mode ddpm_vqvae --config ...` | `config_vqvae_celeb.yml` | Trains a DDPM directly on latents produced by the VQ-VAE. Saves `celeb_ddpm_vqvae/ddpm_ckpt.pth`. |
 | Conditional DDPM | `scripts/train_ddpm_cond.py` / `python main.py --mode ddpm_cond --config con_stable_diff_model/config_celeb.yml` | `config_celeb.yml` | Adds class/image/text conditioning on top of the latent DDPM for guided synthesis. |
+| Conditional DDPM (text + image) | `scripts/train_ddpm_image_text_cond.py` / `python main.py --mode ddpm_image_text_cond --config con_stable_diff_model/config_celeb_text_image.yml` | `config_celeb_text_image.yml` | Hybrid prompt + mask conditioning with side-by-side visualization outputs. |
 
 Each config follows the same structure:
 
@@ -94,6 +153,15 @@ This loads the VQ-VAE checkpoint, consumes `dataset_params`, and saves DDPM weig
 python main.py --mode ddpm_cond --config con_stable_diff_model/config_celeb.yml
 ```
 Make sure `train_params.task_name` in `config_celeb.yml` points to the folder containing the autoencoder checkpoint from step 3, and `cond_model.condition_config` matches your conditioning modality (e.g., image masks with 18 channels for CelebAMask-HQ). Outputs land in `celeb_ddpm_vqvae_cond/`.
+
+### 7. Train text + image conditional DDPM
+```bash
+python main.py --mode ddpm_image_text_cond --config con_stable_diff_model/config_celeb_text_image.yml
+```
+This configuration enables `['text', 'image']` conditioning. Samples are saved under `.../<task_name>_samples/` with:
+- `recon/`: autoencoder reconstructions.
+- `samples/`: diffusion samples.
+- `viz/`: side-by-side grids showing image condition, text prompt, reconstruction, noisy decode, and denoised decode.
 
 ### 7. Outputs and checkpoints
 - VQ-VAE: `celeb/vqvae_autoencoder_ckpt.pth`, `celeb/vqvae_discriminator_ckpt.pth`, sample grids under `vqvae_autoencoder_samples/`.
